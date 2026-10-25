@@ -6,7 +6,7 @@
 
 ## Overview
 
-Heavily inspired by [David Gross CppCon talk](https://www.youtube.com/watch?v=sX2nF1fW7kI). Milestones 1 (the benchmark harness), 2 (three ways to store price levels) and 3 (the order id hash table) are done and measured.
+Inspired by [David Gross CppCon talk](https://www.youtube.com/watch?v=sX2nF1fW7kI). Milestones 1 (the benchmark harness), 2 (three ways to store price levels), and 3 (the order id hash table) are finished and measured.
 
 - Feeds
   - `ob_genfeed` writes a synthetic and customizable feed for benchmarking
@@ -18,11 +18,20 @@ Heavily inspired by [David Gross CppCon talk](https://www.youtube.com/watch?v=sX
      hash table of orders. Each order holds an iterator to its price level, modifying or deleting O(1) on average
   - `VectorBook`: sorted vector of price levels with best price at front of vector, found with lower_bound. Inserting a new level near the top has to shift every level behind it
   - `ReverseVectorBook`: same as VectorBook but best price is located at the back, so inserting near the top only shifts a few levels. The search algo used for finding a price level is a template parameter (lower_bound, branchless, linear)
-  - `TableOnlyBook`: just the order table, no price levels at all. Benchmarking it measures what the table alone costs on the real message mix
-  - `StubBook`: a book that does nothing but increment a counter. Benchmarking it measures the benchmark's own overhead and noise.
-- Order tables (`ob/OrderTable.hpp`), picked with `--table`. A modify or delete arrives with only an order id, so every book needs a table from id to the order's side, price and volume, and pays for it on two of the three message types
-  - `std`: `std::unordered_map`, the baseline. Allocates a node for every add and chases a pointer on every lookup, so it is slow and we measure everything else against it
-  - `identity` and `mix`: our own flat open-addressing table. One array of slots, power of two size so the modulo is a mask, linear probing so a collision only walks to the next slot in the same cache line, backward-shift deletion so deletes leave no tombstones behind. It is sized up front from the feed's peak live order count so it never grows during a run (growing would be a millisecond spike, so it is a hard error instead), and it makes zero allocations while running. `identity` uses the order id's low bits as the slot, which is free but breaks if ids collide on those bits. `mix` runs the id through one multiply-xor-shift round first, which costs a few cycles and works on any id pattern
+  - `TableOnlyBook<Table>`: a hash map from order ID to a record holding side, price, and volume. Table is the hash map implementation (StdOrderTable, FlatIdentityTable, or FlatMixTable). Add inserts the record, modify updates its volume, and delete removes it. It keeps no per-price volume totals. Its benchmarked time minus StubBook’s is the cost of the order-ID operations alone.
+  - `StubBook`: an empty book that increments a counter on every update. It measures the cost of everything around the book, reading and decoding each message, calling the book, and timing it.
+ 
+
+- Order tables (`ob/OrderTable.hpp`), picked with `--table`. A modify or delete arrives with only an order id, so every book needs a table from id to the order's -> {side, price, volume} and pays for it on two of the three message types
+
+ - `std`: `std::unordered_map`, the baseline. Allocates a node for every add and chases a pointer on every lookup, so it is slow and we measure everything else against it
+
+- `identity` and `mix`: our own flat open-addressing table. One array of {id, record} slots, power of two size so the modulo is a mask, linear searching so a collision walks to the next slot, usually in the same or the next cache line, backward-shift deletion so deletes don't leave any marker behind. It is sized once at startup to the next power of two at or above twice the feed's peak live order count, so load stays at or below  0.5 (ratio of filled slots to total slots), so it never grows during a run, and it makes zero heap allocations while running. Going past half load throws a std::length_error, which main catches, prints, and returns 1, ending the run.
+
+  - `identity` uses the low bits of the ID as the slot number. This costs nothing, but if many IDs share  low bits, they pile into the same area and searches get long.
+  - `mix` first multiplies the ID by a fixed 64-bit constant and XORs the top half into the bottom half. This costs a few cycles but spreads any ID pattern evenly.
+ 
+
 - Benchmark (`ob_bench`)
   - times blocks of updates with the CPU cycle counter, drops first ~1% of samples, counts total heap allocation calls
   - Pre-grow heap to avoid page faults, optionally scramble which blocks you allocate, ASLR turned off (memory layout is the same every run), run five times, and if the difference between medians > 5% we flag the run as invalid
